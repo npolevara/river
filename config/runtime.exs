@@ -1,5 +1,105 @@
 import Config
 
+supported_file_variables =
+  MapSet.new(~w(
+    CODEX_RIVER_API_TOKENS
+    CODEX_RIVER_API_TOKEN
+    RIVER_API_TOKEN
+    PORT
+    CODEX_RIVER_BIND_IP
+    CODEX_APP_SERVER_COMMAND
+    CODEX_APP_SERVER_ARGS
+    CODEX_APP_SERVER_CWD
+    CODEX_APP_SERVER_TIMEOUT_MS
+    CODEX_APP_SERVER_SANDBOX
+    CODEX_APP_SERVER_APPROVAL_POLICY
+    CODEX_APP_SERVER_MODEL
+    RIVER_MODEL
+    CODEX_RIVER_LOG_LEVEL
+    CODEX_RIVER_LOG_APP_SERVER
+  ))
+
+explicit_config_file = System.get_env("CODEX_RIVER_CONFIG_FILE")
+config_environment = config_env()
+
+config_file =
+  case explicit_config_file do
+    nil ->
+      if config_environment == :test do
+        nil
+      else
+        case System.get_env("__BURRITO_BIN_PATH") do
+          nil -> Path.expand("codex_river.env")
+          executable -> executable |> Path.dirname() |> Path.join("codex_river.env")
+        end
+      end
+
+    path ->
+      case String.trim(path) do
+        "" -> nil
+        path -> Path.expand(path)
+      end
+  end
+
+parse_file_value = fn value, path, line_number ->
+  value = String.trim(value)
+
+  cond do
+    byte_size(value) >= 2 and
+        ((String.starts_with?(value, "\"") and String.ends_with?(value, "\"")) or
+           (String.starts_with?(value, "'") and String.ends_with?(value, "'"))) ->
+      String.slice(value, 1, String.length(value) - 2)
+
+    String.starts_with?(value, ["\"", "'"]) or String.ends_with?(value, ["\"", "'"]) ->
+      raise "#{path}:#{line_number}: unmatched quote"
+
+    true ->
+      value
+  end
+end
+
+if config_file do
+  if File.regular?(config_file) do
+    file_values =
+      config_file
+      |> File.stream!()
+      |> Stream.with_index(1)
+      |> Enum.reduce(%{}, fn {line, line_number}, values ->
+        line = String.trim(line)
+
+        cond do
+          line == "" or String.starts_with?(line, "#") ->
+            values
+
+          true ->
+            line = String.replace_prefix(line, "export ", "")
+
+            case String.split(line, "=", parts: 2) do
+              [name, value] ->
+                name = String.trim(name)
+
+                unless MapSet.member?(supported_file_variables, name) do
+                  raise "#{config_file}:#{line_number}: unsupported setting #{inspect(name)}"
+                end
+
+                Map.put(values, name, parse_file_value.(value, config_file, line_number))
+
+              _parts ->
+                raise "#{config_file}:#{line_number}: expected NAME=value"
+            end
+        end
+      end)
+
+    Enum.each(file_values, fn {name, value} ->
+      if is_nil(System.get_env(name)), do: System.put_env(name, value)
+    end)
+  else
+    if explicit_config_file && String.trim(explicit_config_file) != "" do
+      raise "CODEX_RIVER_CONFIG_FILE does not exist: #{config_file}"
+    end
+  end
+end
+
 parse_integer = fn name, default ->
   case System.get_env(name) do
     nil -> default

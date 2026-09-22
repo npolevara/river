@@ -5,6 +5,15 @@ require "json"
 class FakeCodexAppServer
   PendingTurn = Struct.new(:message, :thread_id, :turn_id, keyword_init: true)
 
+  MODEL_EFFORTS = {
+    "fake-model" => %w[low medium high xhigh max ultra],
+    "gpt-5.6-sol" => %w[low medium high xhigh max ultra],
+    "gpt-5.6-terra" => %w[none low medium high xhigh max],
+    "gpt-5.6-luna" => %w[low medium high xhigh max],
+    "minimal-model" => %w[minimal low medium high],
+    "malformed-model" => %w[low]
+  }.freeze
+
   def initialize(input: $stdin, output: $stdout)
     @input = input
     @output = output
@@ -16,6 +25,7 @@ class FakeCodexAppServer
     @next_approval = 1
     @threads = {}
     @pending_turns = {}
+    @model_list_calls = 0
   end
 
   def run
@@ -30,6 +40,7 @@ class FakeCodexAppServer
     case message["method"]
     when "initialize" then initialize_connection(message)
     when "initialized" then @initialized = true
+    when "model/list" then list_models(message)
     when "thread/start" then start_thread(message)
     when "turn/start" then start_turn(message)
     when "turn/interrupt" then interrupt_turn(message)
@@ -80,6 +91,33 @@ class FakeCodexAppServer
     emit_notification("thread/started", "thread" => thread)
   end
 
+  def list_models(message)
+    @model_list_calls += 1
+
+    models = MODEL_EFFORTS.map do |model, efforts|
+      entry = {
+        "id" => model,
+        "model" => model,
+        "displayName" => model,
+        "description" => "Fake #{model}",
+        "defaultReasoningEffort" => efforts.include?("medium") ? "medium" : efforts.first,
+        "isDefault" => model == "gpt-5.6-terra",
+        "hidden" => false,
+        "supportedReasoningEfforts" => efforts.map do |effort|
+          {"reasoningEffort" => effort, "description" => "Fake #{effort}"}
+        end
+      }
+
+      if model == "malformed-model"
+        entry["supportedReasoningEfforts"] = "malformed"
+      end
+
+      entry
+    end
+
+    emit_result(message["id"], "data" => models, "nextCursor" => nil)
+  end
+
   def valid_thread_policy?(params)
     params["ephemeral"] == true &&
       params["sandbox"] == "read-only" &&
@@ -94,15 +132,25 @@ class FakeCodexAppServer
       "id" => thread_id,
       "sessionId" => thread_id,
       "ephemeral" => params.fetch("ephemeral", false),
-      "model" => params.fetch("model", "fake-model")
+      "model" => params.fetch("model", "gpt-5.6-sol")
     }
   end
 
   def start_turn(message)
     params = message["params"]
+    thread = @threads[params["threadId"]]
 
-    if params["effort"] == "unsupported"
-      return emit_error(message["id"], -32_602, "Unsupported effort")
+    return emit_error(message["id"], -32_602, "Unknown thread") unless thread
+
+    effort = params["effort"]
+    supported_efforts = MODEL_EFFORTS.fetch(thread["model"], [])
+
+    if effort && !supported_efforts.include?(effort)
+      return emit_error(
+        message["id"],
+        -32_602,
+        "Unsupported effort #{effort.inspect} for model #{thread['model']}"
+      )
     end
 
     turn_id = "turn-#{@next_turn}"
@@ -177,6 +225,14 @@ class FakeCodexAppServer
     when "report-config"
       thread = @threads.fetch(pending_turn.thread_id)
       ["#{thread.fetch("model")}:#{effort}"]
+    when "report-protocol"
+      [
+        JSON.generate(
+          "modelListCalls" => @model_list_calls,
+          "effortPresent" => pending_turn.message["params"].key?("effort"),
+          "effort" => pending_turn.message["params"]["effort"]
+        )
+      ]
     else
       default_response_chunks(prompt)
     end

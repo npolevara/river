@@ -78,6 +78,27 @@ Multiple allowed keys are comma-separated:
 CODEX_RIVER_API_TOKENS=team-a-secret,team-b-secret mix run --no-halt
 ```
 
+### Configuration file
+
+To avoid repeating environment variables in the launch command, copy the
+tracked example to the Git-ignored `codex_river.env` file:
+
+```bash
+cp codex_river.env.example codex_river.env
+mix run --no-halt
+```
+
+When running from source, River looks for `codex_river.env` in the current
+directory. A Burrito executable looks for it next to the executable. Set
+`CODEX_RIVER_CONFIG_FILE=/absolute/path/to/custom.env` to use another location;
+an empty value disables automatic file loading. Values already present in the
+process environment take precedence over the file.
+
+The format is `NAME=value`, with blank lines, `#` comment lines, optional
+single or double quotes, and an optional `export` prefix. Unknown setting names
+fail startup so that typos are not silently ignored. Keep the real file private:
+it can contain bearer tokens and is intentionally excluded from Git.
+
 For compatibility, a single key is also read from `CODEX_RIVER_API_TOKEN`,
 then from `RIVER_API_TOKEN`.
 
@@ -170,6 +191,7 @@ but CodexRiver does not currently map `reasoning.mode` to an app-server field.
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
+| `CODEX_RIVER_CONFIG_FILE` | Explicit path to a `NAME=value` configuration file | `codex_river.env` in the source working directory or next to the Burrito executable |
 | `CODEX_RIVER_API_TOKENS` | Comma-separated allowed bearer tokens | not configured |
 | `PORT` | TCP port | `4005` |
 | `CODEX_RIVER_BIND_IP` | IPv4 or IPv6 bind address | `127.0.0.1` |
@@ -187,8 +209,8 @@ but CodexRiver does not currently map `reasoning.mode` to an app-server field.
 The server binds to loopback by default. If it is bound to an external
 interface, terminate TLS and apply rate limiting at a reverse proxy.
 
-Environment variables are read when the packaged application starts; they are
-not baked into a Burrito executable.
+Environment variables and `codex_river.env` are read when the packaged
+application starts; they are not baked into a Burrito executable.
 
 ## App-server prompt and answer logging
 

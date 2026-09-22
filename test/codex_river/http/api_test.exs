@@ -56,6 +56,20 @@ defmodule CodexRiver.HTTP.APITest do
            } = Jason.decode!(response.body)
   end
 
+  test "negotiates Chat Completions none effort to the model's advertised low" do
+    response =
+      TestHTTPClient.request("POST", "/v1/chat/completions", "test-token-a", %{
+        "model" => "codex-app-server",
+        "reasoning_effort" => "none",
+        "messages" => [%{"role" => "user", "content" => "report-config"}]
+      })
+
+    assert response.status == 200
+
+    assert %{"choices" => [%{"message" => %{"content" => "gpt-5.6-sol:low"}}]} =
+             Jason.decode!(response.body)
+  end
+
   test "returns a model error rejected by app-server" do
     response =
       TestHTTPClient.request("POST", "/v1/chat/completions", "test-token-a", %{
@@ -173,6 +187,22 @@ defmodule CodexRiver.HTTP.APITest do
     assert stream.body =~ "event: response.created"
     assert stream.body =~ "event: response.output_text.delta"
     assert stream.body =~ "event: response.completed"
+  end
+
+  test "negotiates Responses minimal effort without changing the public response" do
+    response =
+      TestHTTPClient.request("POST", "/v1/responses", "test-token-a", %{
+        "model" => "gpt-5.6",
+        "reasoning" => %{"effort" => "minimal"},
+        "input" => "report-config"
+      })
+
+    assert response.status == 200
+
+    assert %{
+             "output" => [%{"content" => [%{"text" => "gpt-5.6-sol:low"}]}],
+             "reasoning" => %{"effort" => "minimal"}
+           } = Jason.decode!(response.body)
   end
 
   test "returns OpenAI-shaped validation errors" do

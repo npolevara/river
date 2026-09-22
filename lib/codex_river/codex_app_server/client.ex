@@ -72,7 +72,10 @@ defmodule CodexRiver.CodexAppServer.Client do
       phase: :queued,
       prompt: prompt,
       model: model,
+      requested_reasoning_effort: reasoning_effort,
       reasoning_effort: reasoning_effort,
+      supported_reasoning_efforts: :unknown,
+      selected_model: nil,
       thread_id: nil,
       turn_id: nil,
       content: "",
@@ -153,7 +156,7 @@ defmodule CodexRiver.CodexAppServer.Client do
       "clientInfo" => %{
         "name" => "codex_river",
         "title" => "CodexRiver",
-        "version" => "0.1.0"
+        "version" => to_string(Application.spec(:codex_river, :vsn))
       }
     }
   end
@@ -183,6 +186,17 @@ defmodule CodexRiver.CodexAppServer.Client do
     {:ok, Port.open({:spawn_executable, to_charlist(command)}, options)}
   rescue
     error -> {:error, {:codex_app_server_start_failed, Exception.message(error)}}
+  end
+
+  defp request_model_capabilities(state, operation_ref, cursor \\ nil) do
+    params =
+      %{"includeHidden" => true}
+      |> maybe_put("cursor", cursor)
+
+    case send_request(state, "model/list", params, {:list_models, operation_ref}) do
+      {:ok, state} -> put_in(state.operations[operation_ref].phase, :listing_models)
+      {:error, _reason, state} -> start_turn_if_active(state, operation_ref)
+    end
   end
 
   defp start_thread(state, operation_ref) do
@@ -315,8 +329,36 @@ defmodule CodexRiver.CodexAppServer.Client do
     end
   end
 
+  defp handle_rpc_result(state, {:list_models, operation_ref}, result) do
+    case state.operations[operation_ref] do
+      nil ->
+        state
+
+      operation ->
+        case supported_reasoning_efforts(result, operation.selected_model) do
+          {:ok, supported} ->
+            state
+            |> negotiate_reasoning_effort(operation_ref, supported)
+            |> start_turn(operation_ref)
+
+          :not_found ->
+            case result["nextCursor"] do
+              cursor when is_binary(cursor) and cursor != "" ->
+                request_model_capabilities(state, operation_ref, cursor)
+
+              _cursor ->
+                start_turn(state, operation_ref)
+            end
+
+          :unknown ->
+            start_turn(state, operation_ref)
+        end
+    end
+  end
+
   defp handle_rpc_result(state, {:start_thread, operation_ref}, result) do
     thread_id = get_in(result, ["thread", "id"])
+    selected_model = result["model"] || get_in(result, ["thread", "model"])
 
     case {state.operations[operation_ref], thread_id} do
       {nil, _thread_id} ->
@@ -325,7 +367,8 @@ defmodule CodexRiver.CodexAppServer.Client do
       {_operation, thread_id} when is_binary(thread_id) ->
         state
         |> put_in([Access.key(:operations), operation_ref, :thread_id], thread_id)
-        |> start_turn(operation_ref)
+        |> put_in([Access.key(:operations), operation_ref, :selected_model], selected_model)
+        |> continue_after_thread_start(operation_ref)
 
       {_operation, _thread_id} ->
         finish_operation(state, operation_ref, {:error, :invalid_thread_response})
@@ -376,6 +419,9 @@ defmodule CodexRiver.CodexAppServer.Client do
 
     finish_operation(state, operation_ref, {:error, reason})
   end
+
+  defp handle_rpc_error(state, {:list_models, operation_ref}, _error),
+    do: start_turn_if_active(state, operation_ref)
 
   defp handle_rpc_error(state, {:start_turn, operation_ref}, error) do
     reason =
@@ -742,7 +788,9 @@ defmodule CodexRiver.CodexAppServer.Client do
   end
 
   defp detach_operation_requests(pending, operation_ref, operation, :cancel) do
-    Map.new(pending, fn
+    pending
+    |> Map.reject(fn {_id, tag} -> tag == {:list_models, operation_ref} end)
+    |> Map.new(fn
       {id, {:start_thread, ^operation_ref}} -> {id, :orphan_thread}
       {id, {:start_turn, ^operation_ref}} -> {id, {:orphan_turn, operation.thread_id}}
       entry -> entry
@@ -751,7 +799,11 @@ defmodule CodexRiver.CodexAppServer.Client do
 
   defp detach_operation_requests(pending, operation_ref, _operation, _cleanup) do
     Map.reject(pending, fn {_id, tag} ->
-      tag in [{:start_thread, operation_ref}, {:start_turn, operation_ref}]
+      tag in [
+        {:list_models, operation_ref},
+        {:start_thread, operation_ref},
+        {:start_turn, operation_ref}
+      ]
     end)
   end
 
@@ -793,6 +845,95 @@ defmodule CodexRiver.CodexAppServer.Client do
     |> inspect()
     |> String.downcase()
     |> String.contains?(field)
+  end
+
+  defp supported_reasoning_efforts(%{"data" => models}, requested_model)
+       when is_list(models) do
+    case Enum.find(models, &model_matches?(&1, requested_model)) do
+      nil -> :not_found
+      model -> parse_reasoning_efforts(model)
+    end
+  end
+
+  defp supported_reasoning_efforts(_result, _requested_model), do: :unknown
+
+  defp model_matches?(model, requested_model)
+       when is_map(model) and is_binary(requested_model) do
+    model["model"] == requested_model or model["id"] == requested_model
+  end
+
+  defp model_matches?(_model, _requested_model), do: false
+
+  defp parse_reasoning_efforts(%{"supportedReasoningEfforts" => options})
+       when is_list(options) do
+    Enum.reduce_while(options, {:ok, []}, fn
+      %{"reasoningEffort" => effort}, {:ok, efforts}
+      when is_binary(effort) and byte_size(effort) > 0 ->
+        {:cont, {:ok, [effort | efforts]}}
+
+      _option, _acc ->
+        {:halt, :unknown}
+    end)
+    |> case do
+      {:ok, efforts} -> {:ok, Enum.reverse(efforts)}
+      :unknown -> :unknown
+    end
+  end
+
+  defp parse_reasoning_efforts(_model), do: :unknown
+
+  defp negotiate_reasoning_effort(state, operation_ref, supported) do
+    operation = state.operations[operation_ref]
+    requested = operation.requested_reasoning_effort
+    effective = resolve_reasoning_effort(requested, supported)
+
+    if effective != requested do
+      Logger.info(
+        "Codex app-server reasoning effort fallback: requested=#{requested} effective=#{effective}",
+        requested_reasoning_effort: requested,
+        effective_reasoning_effort: effective
+      )
+    end
+
+    state
+    |> put_in([Access.key(:operations), operation_ref, :supported_reasoning_efforts], supported)
+    |> put_in([Access.key(:operations), operation_ref, :reasoning_effort], effective)
+  end
+
+  defp resolve_reasoning_effort(nil, _supported), do: nil
+
+  defp resolve_reasoning_effort(requested, supported) when is_list(supported) do
+    cond do
+      requested in supported -> requested
+      requested in ["none", "minimal"] and "low" in supported -> "low"
+      true -> requested
+    end
+  end
+
+  defp resolve_reasoning_effort(requested, :unknown), do: requested
+
+  defp continue_after_thread_start(state, operation_ref) do
+    case state.operations[operation_ref] do
+      nil ->
+        state
+
+      %{requested_reasoning_effort: nil} ->
+        start_turn(state, operation_ref)
+
+      %{selected_model: selected_model} when is_binary(selected_model) and selected_model != "" ->
+        request_model_capabilities(state, operation_ref)
+
+      _operation ->
+        start_turn(state, operation_ref)
+    end
+  end
+
+  defp start_turn_if_active(state, operation_ref) do
+    if state.operations[operation_ref] do
+      start_turn(state, operation_ref)
+    else
+      state
+    end
   end
 
   defp maybe_put(map, _key, value) when value in [nil, ""], do: map

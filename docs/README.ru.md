@@ -78,6 +78,27 @@ mix run --no-halt
 CODEX_RIVER_API_TOKENS=team-a-secret,team-b-secret mix run --no-halt
 ```
 
+### Конфигурационный файл
+
+Чтобы не повторять переменные окружения в команде запуска, скопируйте
+отслеживаемый пример в игнорируемый Git файл `codex_river.env`:
+
+```bash
+cp codex_river.env.example codex_river.env
+mix run --no-halt
+```
+
+При запуске из исходников River ищет `codex_river.env` в текущей папке.
+Burrito executable ищет его рядом с executable. Другой путь можно указать через
+`CODEX_RIVER_CONFIG_FILE=/absolute/path/to/custom.env`; пустое значение отключает
+автоматическую загрузку файла. Уже заданные переменные окружения имеют приоритет
+над значениями из файла.
+
+Формат — `NAME=value`: поддерживаются пустые строки, строки-комментарии с `#`,
+одинарные или двойные кавычки и необязательный префикс `export`. Неизвестное имя
+останавливает запуск, чтобы опечатка не осталась незамеченной. Храните настоящий
+файл приватно: в нём могут находиться bearer tokens, поэтому он исключён из Git.
+
 Для совместимости одиночный ключ также читается из
 `CODEX_RIVER_API_TOKEN`, а затем из `RIVER_API_TOKEN`.
 
@@ -170,6 +191,7 @@ CodexRiver пока не сопоставляет `reasoning.mode` с полем
 
 | Переменная | Назначение | Значение по умолчанию |
 | --- | --- | --- |
+| `CODEX_RIVER_CONFIG_FILE` | Явный путь к конфигурационному файлу `NAME=value` | `codex_river.env` в рабочей папке исходников или рядом с Burrito executable |
 | `CODEX_RIVER_API_TOKENS` | Разрешённые bearer tokens через запятую | не настроены |
 | `PORT` | TCP port | `4005` |
 | `CODEX_RIVER_BIND_IP` | IPv4 или IPv6 bind address | `127.0.0.1` |
@@ -187,8 +209,8 @@ CodexRiver пока не сопоставляет `reasoning.mode` с полем
 По умолчанию сервер доступен только через loopback. При использовании внешнего
 интерфейса TLS termination и rate limiting следует настроить на reverse proxy.
 
-Переменные окружения читаются при запуске упакованного приложения и не
-запекаются в Burrito executable.
+Переменные окружения и `codex_river.env` читаются при запуске упакованного
+приложения и не запекаются в Burrito executable.
 
 ## Логирование app-server prompt и ответа
 
