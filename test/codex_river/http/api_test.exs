@@ -70,6 +70,24 @@ defmodule CodexRiver.HTTP.APITest do
              Jason.decode!(response.body)
   end
 
+  test "switches models after an overloaded Chat Completions turn" do
+    response =
+      TestHTTPClient.request("POST", "/v1/chat/completions", "test-token-a", %{
+        "model" => "gpt-5.6-sol",
+        "reasoning_effort" => "high",
+        "messages" => [
+          %{"role" => "user", "content" => "overload-until:gpt-5.6-luna"}
+        ]
+      })
+
+    assert response.status == 200
+
+    assert %{
+             "model" => "gpt-5.6-sol",
+             "choices" => [%{"message" => %{"content" => "gpt-5.6-luna:high"}}]
+           } = Jason.decode!(response.body)
+  end
+
   test "returns a model error rejected by app-server" do
     response =
       TestHTTPClient.request("POST", "/v1/chat/completions", "test-token-a", %{

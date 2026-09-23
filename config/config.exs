@@ -16,6 +16,7 @@ config :codex_river, CodexRiver.CodexAppServer.Client,
   timeout: 120_000,
   sandbox: "read-only",
   approval_policy: "never",
+  force_low: false,
   log_app_server: false
 
 import_config "#{config_env()}.exs"

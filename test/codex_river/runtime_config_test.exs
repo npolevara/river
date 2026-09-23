@@ -16,6 +16,7 @@ defmodule CodexRiver.RuntimeConfigTest do
     CODEX_APP_SERVER_SANDBOX
     CODEX_APP_SERVER_APPROVAL_POLICY
     CODEX_APP_SERVER_MODEL
+    LLM_FORCE_LOW
     RIVER_MODEL
     CODEX_RIVER_LOG_LEVEL
     CODEX_RIVER_LOG_APP_SERVER
@@ -49,6 +50,7 @@ defmodule CodexRiver.RuntimeConfigTest do
     PORT=4567
     CODEX_RIVER_LOG_LEVEL=debug
     CODEX_RIVER_LOG_APP_SERVER=true
+    LLM_FORCE_LOW=true
     """)
 
     config = read_runtime(config_file)
@@ -57,6 +59,15 @@ defmodule CodexRiver.RuntimeConfigTest do
     assert config[:codex_river][:api_tokens] == ["first", "second"]
     assert config[:codex_river][:port] == 4567
     assert config[:logger][:level] == :debug
+    assert config[:codex_river][CodexRiver.CodexAppServer.Client][:force_low]
+  end
+
+  test "rejects an invalid force-low boolean", %{config_file: config_file} do
+    File.write!(config_file, "LLM_FORCE_LOW=maybe\n")
+
+    assert_raise RuntimeError, ~r/LLM_FORCE_LOW must be true\/false/, fn ->
+      read_runtime(config_file)
+    end
   end
 
   test "environment variables override values from the file", %{config_file: config_file} do

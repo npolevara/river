@@ -203,6 +203,12 @@ class FakeCodexAppServer
   def finish_turn(pending_turn)
     prompt = pending_turn.message["params"]["input"][0]["text"]
     effort = pending_turn.message["params"].fetch("effort", "medium")
+
+    if overload?(prompt, pending_turn)
+      emit_overloaded_turn(pending_turn)
+      return
+    end
+
     chunks = response_chunks(prompt, pending_turn, effort)
     item = agent_message(pending_turn.turn_id, chunks.join)
 
@@ -233,9 +239,39 @@ class FakeCodexAppServer
           "effort" => pending_turn.message["params"]["effort"]
         )
       ]
+    when /^overload-until:/
+      thread = @threads.fetch(pending_turn.thread_id)
+      ["#{thread.fetch("model")}:#{effort}"]
     else
       default_response_chunks(prompt)
     end
+  end
+
+  def overload?(prompt, pending_turn)
+    return true if prompt == "overload-always"
+    return false unless prompt.start_with?("overload-until:")
+
+    target_model = prompt.delete_prefix("overload-until:")
+    @threads.fetch(pending_turn.thread_id).fetch("model") != target_model
+  end
+
+  def emit_overloaded_turn(pending_turn)
+    model = @threads.fetch(pending_turn.thread_id).fetch("model")
+
+    emit_notification(
+      "turn/completed",
+      "threadId" => pending_turn.thread_id,
+      "turn" => {
+        "id" => pending_turn.turn_id,
+        "status" => "failed",
+        "items" => [],
+        "error" => {
+          "additionalDetails" => {"model" => model},
+          "codexErrorInfo" => "serverOverloaded",
+          "message" => "Selected model is at capacity. Please try a different model."
+        }
+      }
+    )
   end
 
   def default_response_chunks(prompt)

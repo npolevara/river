@@ -180,6 +180,13 @@ curl http://127.0.0.1:4005/v1/responses \
 - `gpt-5.6` преобразуется в локальный Codex model ID `gpt-5.6-sol`;
 - явные ID, например `gpt-5.6-sol`, `gpt-5.6-terra` и `gpt-5.6-luna`,
   передаются в app-server без изменений;
+- `LLM_FORCE_LOW=true` заменяет начальную модель и effort
+  любого запроса на `gpt-5.6-luna` и `low`;
+- если app-server возвращает `serverOverloaded`, River повторяет запрос на
+  соседнем уровне модели, сохраняя фактический reasoning effort. При старте с
+  Sol последовательность имеет вид Sol -> Terra -> Luna -> Terra -> Sol;
+  допускается не более четырёх переключений, после чего возвращается исходная
+  ошибка;
 - пробелы по краям model ID удаляются;
 - `stream` меняет только wire format ответа, но не выбор модели.
 
@@ -202,6 +209,7 @@ CodexRiver пока не сопоставляет `reasoning.mode` с полем
 | `CODEX_APP_SERVER_SANDBOX` | Sandbox thread (`read-only`, `workspace-write` или `danger-full-access`) | `read-only` |
 | `CODEX_APP_SERVER_APPROVAL_POLICY` | Политика подтверждений thread | `never` |
 | `CODEX_APP_SERVER_MODEL` | Модель для публичного ID `codex-app-server` | локальная Codex default |
+| `LLM_FORCE_LOW` | Принудительная начальная пара `gpt-5.6-luna`/`low` | `false` |
 | `RIVER_MODEL` | Публичный compatibility model ID | `codex-app-server` |
 | `CODEX_RIVER_LOG_LEVEL` | Минимальный уровень Logger | `info` |
 | `CODEX_RIVER_LOG_APP_SERVER` | Вывод полных app-server prompt и ответа на уровне debug | `false` |
@@ -211,6 +219,11 @@ CodexRiver пока не сопоставляет `reasoning.mode` с полем
 
 Переменные окружения и `codex_river.env` читаются при запуске упакованного
 приложения и не запекаются в Burrito executable.
+
+Принудительная смена модели и переключения из-за перегрузки логируются на
+уровне `info`: предыдущая модель, следующая модель и фактический effort. Для
+повторов после перегрузки также указывается номер переключения. Обычное
+согласование `none`/`minimal` в `low` не логируется.
 
 ## Логирование app-server prompt и ответа
 
@@ -363,9 +376,12 @@ MIX_ENV=prod mix release --overwrite
 файлом исходного Elixir-кода. При первом запуске payload распаковывается во
 внутреннюю application-data папку платформы.
 
-Production Burrito executable повторно использует уже распакованный payload с
-той же версией приложения. Если во время разработки вы пересобираете `0.1.0`,
-один раз удалите закэшированный runtime перед запуском нового бинарника:
+Production Burrito executable повторно использует уже распакованный payload,
+если версия приложения не изменилась, даже когда сам executable был
+пересобран. Поэтому новая runtime-настройка может завершить запуск с ошибкой
+`unsupported setting`, если в кэше остался старый payload. После пересборки той
+же версии во время разработки один раз удалите закэшированный runtime перед
+запуском нового бинарника:
 
 ```bash
 ./burrito_out/codex_river_macos_arm64 maintenance uninstall

@@ -12,6 +12,9 @@ defmodule CodexRiver.CodexAppServer.Client do
   require Logger
 
   @default_timeout 120_000
+  @lowest_model "gpt-5.6-luna"
+  @lowest_reasoning_effort "low"
+  @max_overload_model_switches 4
 
   defstruct port: nil,
             status: :disconnected,
@@ -64,6 +67,7 @@ defmodule CodexRiver.CodexAppServer.Client do
   def handle_call({:complete, prompt, model, reasoning_effort, on_delta, timeout}, from, state) do
     operation_ref = make_ref()
     caller = elem(from, 0)
+    {model, reasoning_effort} = maybe_force_lowest_model(state, model, reasoning_effort)
 
     operation = %{
       from: from,
@@ -78,6 +82,8 @@ defmodule CodexRiver.CodexAppServer.Client do
       selected_model: nil,
       thread_id: nil,
       turn_id: nil,
+      overload_model_switches: 0,
+      overload_model_direction: nil,
       content: "",
       usage: nil,
       agent_items: %{},
@@ -410,28 +416,32 @@ defmodule CodexRiver.CodexAppServer.Client do
   defp handle_rpc_result(state, _pending_tag, _result), do: state
 
   defp handle_rpc_error(state, {:start_thread, operation_ref}, error) do
-    reason =
-      if requested_value_error?(error, "model") do
-        {:unsupported_model, error}
-      else
-        {:app_server_error, error}
-      end
+    cond do
+      server_overloaded?(error) ->
+        retry_with_another_model(state, operation_ref, error)
 
-    finish_operation(state, operation_ref, {:error, reason})
+      requested_value_error?(error, "model") ->
+        finish_operation(state, operation_ref, {:error, {:unsupported_model, error}})
+
+      true ->
+        finish_operation(state, operation_ref, {:error, {:app_server_error, error}})
+    end
   end
 
   defp handle_rpc_error(state, {:list_models, operation_ref}, _error),
     do: start_turn_if_active(state, operation_ref)
 
   defp handle_rpc_error(state, {:start_turn, operation_ref}, error) do
-    reason =
-      if requested_value_error?(error, "effort") do
-        {:unsupported_reasoning_effort, error}
-      else
-        {:app_server_error, error}
-      end
+    cond do
+      server_overloaded?(error) ->
+        retry_with_another_model(state, operation_ref, error)
 
-    finish_operation(state, operation_ref, {:error, reason})
+      requested_value_error?(error, "effort") ->
+        finish_operation(state, operation_ref, {:error, {:unsupported_reasoning_effort, error}})
+
+      true ->
+        finish_operation(state, operation_ref, {:error, {:app_server_error, error}})
+    end
   end
 
   defp handle_rpc_error(state, {:interrupt, thread_id}, _error),
@@ -607,12 +617,16 @@ defmodule CodexRiver.CodexAppServer.Client do
   end
 
   defp finish_turn(state, operation_ref, _operation, %{"status" => "failed"} = turn) do
-    finish_operation(
-      state,
-      operation_ref,
-      {:error, {:app_server_turn_failed, turn["error"]}},
-      cleanup: :unsubscribe
-    )
+    if server_overloaded?(turn["error"]) do
+      retry_with_another_model(state, operation_ref, turn["error"])
+    else
+      finish_operation(
+        state,
+        operation_ref,
+        {:error, {:app_server_turn_failed, turn["error"]}},
+        cleanup: :unsubscribe
+      )
+    end
   end
 
   defp finish_turn(state, operation_ref, _operation, turn) do
@@ -847,6 +861,85 @@ defmodule CodexRiver.CodexAppServer.Client do
     |> String.contains?(field)
   end
 
+  defp server_overloaded?(%{"codexErrorInfo" => "serverOverloaded"}), do: true
+
+  defp server_overloaded?(%{"codexErrorInfo" => info}) when is_map(info) do
+    info["type"] == "serverOverloaded" or info["kind"] == "serverOverloaded" or
+      info["code"] == "serverOverloaded" or Map.has_key?(info, "serverOverloaded")
+  end
+
+  defp server_overloaded?(_error), do: false
+
+  defp retry_with_another_model(state, operation_ref, overload_error) do
+    case state.operations[operation_ref] do
+      nil ->
+        state
+
+      operation ->
+        current_model = operation.selected_model || operation.model
+
+        with true <- operation.overload_model_switches < @max_overload_model_switches,
+             {:ok, next_model, direction} <-
+               next_overload_model(current_model, operation.overload_model_direction) do
+          switch_number = operation.overload_model_switches + 1
+
+          Logger.info(
+            "Codex app-server model switch after overload: " <>
+              "from=#{current_model} to=#{next_model} " <>
+              "effort=#{operation.reasoning_effort || "default"} " <>
+              "switch=#{switch_number}/#{@max_overload_model_switches}",
+            previous_model: current_model,
+            next_model: next_model,
+            reasoning_effort: operation.reasoning_effort,
+            overload_model_switch: switch_number
+          )
+
+          previous_thread_id = operation.thread_id
+
+          operation = %{
+            operation
+            | phase: :queued,
+              model: next_model,
+              requested_reasoning_effort: operation.reasoning_effort,
+              supported_reasoning_efforts: :unknown,
+              selected_model: nil,
+              thread_id: nil,
+              turn_id: nil,
+              overload_model_switches: switch_number,
+              overload_model_direction: direction,
+              content: "",
+              usage: nil,
+              agent_items: %{}
+          }
+
+          state
+          |> put_in([Access.key(:operations), operation_ref], operation)
+          |> unsubscribe_thread(previous_thread_id)
+          |> start_thread(operation_ref)
+        else
+          _no_retry ->
+            finish_operation(
+              state,
+              operation_ref,
+              {:error, {:app_server_turn_failed, overload_error}},
+              cleanup: :unsubscribe
+            )
+        end
+    end
+  end
+
+  defp next_overload_model("gpt-5.6-sol", direction) when direction in [nil, :down],
+    do: {:ok, "gpt-5.6-terra", :down}
+
+  defp next_overload_model("gpt-5.6-terra", direction) when direction in [nil, :down],
+    do: {:ok, "gpt-5.6-luna", :down}
+
+  defp next_overload_model("gpt-5.6-luna", direction) when direction in [nil, :down],
+    do: {:ok, "gpt-5.6-terra", :up}
+
+  defp next_overload_model("gpt-5.6-terra", :up), do: {:ok, "gpt-5.6-sol", :up}
+  defp next_overload_model(_model, _direction), do: :error
+
   defp supported_reasoning_efforts(%{"data" => models}, requested_model)
        when is_list(models) do
     case Enum.find(models, &model_matches?(&1, requested_model)) do
@@ -887,14 +980,6 @@ defmodule CodexRiver.CodexAppServer.Client do
     requested = operation.requested_reasoning_effort
     effective = resolve_reasoning_effort(requested, supported)
 
-    if effective != requested do
-      Logger.info(
-        "Codex app-server reasoning effort fallback: requested=#{requested} effective=#{effective}",
-        requested_reasoning_effort: requested,
-        effective_reasoning_effort: effective
-      )
-    end
-
     state
     |> put_in([Access.key(:operations), operation_ref, :supported_reasoning_efforts], supported)
     |> put_in([Access.key(:operations), operation_ref, :reasoning_effort], effective)
@@ -933,6 +1018,25 @@ defmodule CodexRiver.CodexAppServer.Client do
       start_turn(state, operation_ref)
     else
       state
+    end
+  end
+
+  defp maybe_force_lowest_model(%{config: config}, model, reasoning_effort) do
+    if config[:force_low] do
+      if model != @lowest_model or reasoning_effort != @lowest_reasoning_effort do
+        Logger.info(
+          "Codex app-server forced model: " <>
+            "from=#{model || "default"} to=#{@lowest_model} " <>
+            "effort=#{reasoning_effort || "default"}->#{@lowest_reasoning_effort}",
+          previous_model: model,
+          next_model: @lowest_model,
+          reasoning_effort: @lowest_reasoning_effort
+        )
+      end
+
+      {@lowest_model, @lowest_reasoning_effort}
+    else
+      {model, reasoning_effort}
     end
   end
 

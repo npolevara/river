@@ -180,6 +180,12 @@ only for `/v1/chat/completions`.
 - `gpt-5.6` maps to the local Codex model ID `gpt-5.6-sol`;
 - explicit IDs such as `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` are
   passed to app-server unchanged;
+- `LLM_FORCE_LOW=true` overrides every initial request with
+  `gpt-5.6-luna` and `low` reasoning effort;
+- when app-server reports `serverOverloaded`, River retries on adjacent model
+  tiers while preserving the effective reasoning effort. Starting from Sol,
+  the sequence is Sol -> Terra -> Luna -> Terra -> Sol, with at most four
+  model switches before the original error is returned;
 - surrounding whitespace in a model ID is removed;
 - `stream` changes only the response wire format, not model selection.
 
@@ -202,6 +208,7 @@ but CodexRiver does not currently map `reasoning.mode` to an app-server field.
 | `CODEX_APP_SERVER_SANDBOX` | Thread sandbox (`read-only`, `workspace-write`, or `danger-full-access`) | `read-only` |
 | `CODEX_APP_SERVER_APPROVAL_POLICY` | Thread approval policy | `never` |
 | `CODEX_APP_SERVER_MODEL` | Model used for the public `codex-app-server` ID | local Codex default |
+| `LLM_FORCE_LOW` | Force initial model/effort to `gpt-5.6-luna`/`low` | `false` |
 | `RIVER_MODEL` | Public compatibility model ID | `codex-app-server` |
 | `CODEX_RIVER_LOG_LEVEL` | Minimum Logger level | `info` |
 | `CODEX_RIVER_LOG_APP_SERVER` | Log complete app-server prompts and answers at debug level | `false` |
@@ -211,6 +218,11 @@ interface, terminate TLS and apply rate limiting at a reverse proxy.
 
 Environment variables and `codex_river.env` are read when the packaged
 application starts; they are not baked into a Burrito executable.
+
+Overload-driven and forced model switches are logged at `info` level with the
+previous model, next model, and effective effort; overload retries also include
+the switch count. Routine `none`/`minimal` to `low` effort negotiation is not
+logged.
 
 ## App-server prompt and answer logging
 
@@ -363,9 +375,12 @@ is a self-extracting executable containing the application and ERTS, not a
 single Elixir source file. On first launch, its payload is unpacked into the
 platform application-data directory.
 
-A production Burrito executable reuses an already unpacked payload with the
-same application version. When rebuilding `0.1.0` during development, remove
-the cached runtime once before starting the new binary:
+A production Burrito executable reuses an already unpacked payload when the
+application version has not changed, even if the executable itself was
+rebuilt. Consequently, a newly added runtime option may fail with
+`unsupported setting` when an older payload is still cached. After rebuilding
+the same version during development, remove the cached runtime once before
+starting the new binary:
 
 ```bash
 ./burrito_out/codex_river_macos_arm64 maintenance uninstall

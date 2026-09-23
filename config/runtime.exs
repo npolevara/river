@@ -14,6 +14,7 @@ supported_file_variables =
     CODEX_APP_SERVER_SANDBOX
     CODEX_APP_SERVER_APPROVAL_POLICY
     CODEX_APP_SERVER_MODEL
+    LLM_FORCE_LOW
     RIVER_MODEL
     CODEX_RIVER_LOG_LEVEL
     CODEX_RIVER_LOG_APP_SERVER
@@ -152,6 +153,7 @@ if log_level do
 end
 
 log_app_server = parse_boolean.("CODEX_RIVER_LOG_APP_SERVER", nil)
+force_low = parse_boolean.("LLM_FORCE_LOW", nil)
 
 if log_app_server do
   config :logger, truncate: :infinity
@@ -206,6 +208,7 @@ codex_app_server_config =
     timeout: parse_integer.("CODEX_APP_SERVER_TIMEOUT_MS", nil),
     sandbox: System.get_env("CODEX_APP_SERVER_SANDBOX"),
     approval_policy: System.get_env("CODEX_APP_SERVER_APPROVAL_POLICY"),
+    force_low: force_low,
     log_app_server: log_app_server
   ]
   |> Enum.reject(fn {_key, value} -> is_nil(value) end)

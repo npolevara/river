@@ -72,9 +72,8 @@ For unsupported values outside the explicit fallback, return the requested
 value unchanged and let ACP produce the existing structured error. This keeps
 the current error details and HTTP mapping intact.
 
-When `none` or `minimal` falls back to `low`, write one structured info/debug
-log containing the requested and effective efforts. Do not log bearer tokens,
-prompts, or response content.
+Do not log the routine `none` or `minimal` fallback to `low`; it can happen on
+every request and does not indicate a failure.
 
 ## Tests
 
